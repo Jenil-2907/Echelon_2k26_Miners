@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>System Audio Monitor</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>System Audio Monitor</h1>
+            <div class="status-badge" id="statusBadge">READY</div>
+        </header>
+
+        <div class="controls">
+            <button id="recordBtn" class="btn primary">Start System Capture</button>
+            <div id="statusText" class="timer">Waiting...</div>
+        </div>
+
+        <div class="stream-container" id="streamContainer">
+            <!-- Chunks will appear here -->
+        </div>
+    </div>
+
+    <script>
+        const recordBtn = document.getElementById('recordBtn');
+        const streamContainer = document.getElementById('streamContainer');
+        const statusBadge = document.getElementById('statusBadge');
+        const statusText = document.getElementById('statusText');
+
+        let socket;
+        let isCapturing = false;
+
+        // Request Notification Permission on load
+        if ("Notification" in window) {
+            // Check if already denied/granted
+            if (Notification.permission !== "granted" && Notification.permission !== "denied") {
+                Notification.requestPermission().then(permission => {
+                    console.log("Notification permission:", permission);
+                });
+            }
+        }
+
+        // --- Audio Alert Logic ---
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+        function playAlertSound() {
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
+            oscillator.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + 0.5); // Drop to A4 (Bell-like)
+
+            gainNode.gain.setValueAtTime(0.5, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.5);
+
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+
+            oscillator.start();
+            oscillator.stop(audioCtx.currentTime + 0.5);
+        }
+
+        // Initialize WebSocket immediately to listen
+        initWebSocket();
+
+        function initWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            socket = new WebSocket(`${protocol}//${window.location.host}/ws/monitor`);
+
+            socket.onopen = () => {
+                console.log("WebSocket connected");
+            };
+
+            socket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.status === 'new_chunk') {
+                    addChunkCard(data.filename, data.chunk_index, data.prediction);
+
+                    // ALERT on FAKE
+                    if (data.prediction && data.prediction.label === 'Fake') {
+                        triggerAlert(data.chunk_index, data.prediction.score);
+                    }
+                }
+            };
+
+            socket.onclose = () => {
+                console.log("WebSocket disconnected. Retrying...");
+                setTimeout(initWebSocket, 2000);
+            };
+        }
+
+        function triggerAlert(index, score) {
+            const msg = `Deepfake Detected! Chunk #${index} (${(score * 100).toFixed(0)}% Fake)`;
+
+            // 1. Play Sound
+            playAlertSound();
+
+            // 2. System Notification
+            if (Notification.permission === "granted") {
+                new Notification("⚠️ Warning: Fake Audio Detected", {
+                    body: msg,
+                    requireInteraction: false
+                });
+            }
+
+            // 3. Visual Flash on Page Title
+            const oldTitle = document.title;
+            let flashCount = 0;
+            const flashInterval = setInterval(() => {
+                document.title = (flashCount % 2 === 0) ? "⚠️ FAKE! ⚠️" : "Alert!";
+                flashCount++;
+                if (flashCount > 6) {
+                    clearInterval(flashInterval);
+                    document.title = oldTitle;
+                }
+            }, 500);
+        }
+
+        recordBtn.addEventListener('click', async () => {
+            if (!isCapturing) {
+                // Start
+                recordBtn.disabled = true;
+                const res = await fetch('/start_capture');
+                const data = await res.json();
+                if (data.status === 'started' || data.status === 'already_running') {
+                    isCapturing = true;
+                    updateUIState(true);
+                }
+                recordBtn.disabled = false;
+            } else {
+                // Stop
+                recordBtn.disabled = true;
+                await fetch('/stop_capture');
+                isCapturing = false;
+                updateUIState(false);
+                recordBtn.disabled = false;
+            }
+        });
+
+        function updateUIState(active) {
+            if (active) {
+                recordBtn.textContent = "Stop System Capture";
+                recordBtn.classList.add("recording");
+                statusBadge.textContent = "CAPTURING";
+                statusBadge.className = "status-badge live";
+                statusText.textContent = "Capturing System Audio...";
+                streamContainer.innerHTML = '';
+            } else {
+                recordBtn.textContent = "Start System Capture";
+                recordBtn.classList.remove("recording");
+                statusBadge.textContent = "IDLE";
+                statusBadge.className = "status-badge";
+                statusText.textContent = "Stopped.";
+            }
+        }
+
+        function addChunkCard(filename, index, prediction) {
+            const card = document.createElement('div');
+            card.className = 'chunk-card fade-in';
+
+            const header = document.createElement('div');
+            header.style.display = 'flex';
+            header.style.justifyContent = 'space-between';
+            header.style.alignItems = 'center';
+
+            const title = document.createElement('div');
+            title.className = 'chunk-title';
+            title.textContent = `Chunk #${index}`;
+
+            const badge = document.createElement('div');
+            badge.style.padding = '2px 8px';
+            badge.style.borderRadius = '4px';
+            badge.style.fontSize = '0.75rem';
+            badge.style.fontWeight = 'bold';
+
+            if (prediction) {
+                const label = prediction.label;
+                const score = (prediction.score * 100).toFixed(1);
+
+                let text = `${label} (${score}%)`;
+                if (prediction.lstm_score !== undefined && prediction.lstm_score !== -1 && prediction.lstm_score !== null) {
+                    const lstm = (prediction.lstm_score).toFixed(2);
+                    text += ` | LSTM: ${lstm}`;
+                }
+                if (prediction.simulated) text += '*';
+
+                badge.textContent = text;
+
+                if (label === 'Real') {
+                    badge.style.backgroundColor = 'var(--success)';
+                    badge.style.color = 'white';
+                } else if (label === 'Fake') {
+                    badge.style.backgroundColor = 'var(--danger)';
+                    badge.style.color = 'white';
+                } else {
+                    badge.style.backgroundColor = 'var(--warning)';
+                    badge.style.color = 'black';
+                }
+            }
+
+            header.appendChild(title);
+            header.appendChild(badge);
+
+            const audio = document.createElement('audio');
+            audio.controls = true;
+            audio.src = `/static/chunks/${filename}?t=${Date.now()}`;
+
+            card.appendChild(header);
+            card.appendChild(audio);
+
+            streamContainer.appendChild(card);
+
+            if (index > 0) {
+                card.scrollIntoView({ behavior: 'smooth' });
+            }
+        }
+    </script>
+</body>
+
+</html>
